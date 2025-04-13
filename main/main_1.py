@@ -212,9 +212,104 @@ class SphereVisualizer:
             logger.error(f"Erro ao criar malha da esfera: {e}", exc_info=True)
             return None
 
+    def create_goldberg_polyhedron(self) -> Optional[pv.PolyData]:
+        """
+        Creates a Goldberg polyhedron mesh (mostly hexagons, 12 pentagons).
+
+        This is achieved by:
+        1. Creating a base icosahedron (triangular faces).
+        2. Subdividing the icosahedron to create a finer triangular mesh (geodesic dome).
+        3. Computing the dual of the subdivided mesh. The faces of the dual correspond
+           to the vertices of the original, resulting in hexagons and pentagons.
+        4. Projecting the vertices of the dual mesh onto a sphere of the specified radius.
+
+        Args:
+            radius (float, optional): The final radius of the spherical polyhedron. Defaults to 1.0.
+            subdivisions (int, optional): The number of subdivisions applied to the base
+                                          icosahedron *before* taking the dual. Higher values
+                                          result in a more complex Goldberg polyhedron (higher class).
+                                          Defaults to 1.
+
+        Returns:
+            Optional[pv.PolyData]: A PyVista PolyData object representing the Goldberg
+                                   polyhedron mesh, or None if an error occurs.
+        """
+        try:
+            logger.info(f"Creating Goldberg Polyhedron: subdivisions={self.subdivisions}, radius={self.radius}")
+
+            # Step 1: Create an icosahedron (base triangular mesh)
+            base_icosahedron = pv.Icosahedron()
+            logger.debug("Base icosahedron created.")
+
+            # Step 2: Subdivide the icosahedron (creates a geodesic dome)
+            # 'loop' subdivision works well for smoothing triangular meshes.
+            if self.subdivisions > 0:
+                subdivided_mesh = base_icosahedron.subdivide(self.subdivisions, subfilter='loop')
+                logger.debug(f"Icosahedron subdivided {self.subdivisions} times.")
+            else:
+                subdivided_mesh = base_icosahedron # No subdivisions requested
+                logger.debug("No subdivisions applied to icosahedron.")
+
+            # Step 3: Compute the dual mesh
+            # The dual mesh swaps vertices and faces. Vertices with 6 neighbors become hexagons,
+            # vertices with 5 neighbors (original icosahedron vertices) become pentagons.
+            # Ensure the mesh is suitable for dual computation (triangulated, closed)
+            subdivided_mesh.clean(inplace=True) # Good practice before dual
+            goldberg_mesh = subdivided_mesh.dual()
+            logger.debug(f"Dual mesh computed. Cells before projection: {goldberg_mesh.n_cells}")
+
+            # Ensure the dual mesh has faces (sometimes dual might produce only lines/verts if input is weird)
+            if goldberg_mesh.n_cells == 0:
+                raise ValueError("Dual mesh resulted in no cells. Input mesh might be unsuitable.")
+
+
+            # --- Important Check: Verify Cell Types (Optional but Recommended) ---
+            # This confirms we actually have hexagons and pentagons
+            cell_n_points = goldberg_mesh.cell_n_points
+            unique_counts, counts = np.unique(cell_n_points, return_counts=True)
+            logger.info(f"Cell types in dual mesh (before projection): {dict(zip(unique_counts, counts))}")
+            if 5 not in unique_counts or 6 not in unique_counts:
+                logger.warning("Dual mesh does not contain expected pentagons and hexagons!")
+            # --- End Check ---
+
+
+            # Step 4: Normalize vertices to project onto the sphere and apply radius
+            # Use the center of the *original* subdivided mesh for projection reference if needed,
+            # though projecting from (0,0,0) is usually correct if centered.
+            origin = subdivided_mesh.center # Or simply np.array([0.0, 0.0, 0.0]) if known center
+            vertex_vectors = goldberg_mesh.points - origin
+            norms = np.linalg.norm(vertex_vectors, axis=1)
+            norms[norms == 0] = 1.0  # Avoid division by zero
+
+            # Apply the projection and radius scaling
+            goldberg_mesh.points = origin + (vertex_vectors / norms[:, np.newaxis]) * self.radius
+            logger.debug("Vertices projected onto sphere and radius applied.")
+
+            # Step 5: Clean the final mesh (optional but good practice)
+            # This can fix potential issues after projection/scaling
+            goldberg_mesh.clean(inplace=True)
+
+            # Step 6: Add optional cell data for interaction/visualization
+            goldberg_mesh.cell_data['FaceID'] = np.arange(goldberg_mesh.n_cells)
+            # Initialize highlight state (useful if integrating with your previous code)
+            goldberg_mesh.cell_data['Highlight'] = np.full(goldberg_mesh.n_cells, 0, dtype=int)
+            goldberg_mesh.set_active_scalars('Highlight') # Set default scalars for coloring
+            logger.debug("FaceID and Highlight data added.")
+
+            logger.info(f"Goldberg polyhedron created successfully: {goldberg_mesh.n_points} points, {goldberg_mesh.n_cells} cells.")
+            return goldberg_mesh
+
+        except ValueError as ve: # Catch specific errors like dual failing
+            logger.error(f"Value error during Goldberg creation: {ve}", exc_info=False) # No need for full traceback if msg is clear
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error creating Goldberg polyhedron: {e}", exc_info=True)
+            return None
+
     def _create_meshes(self):
         """Cria a malha da esfera principal e a malha do peão."""
         self.mesh_esfera = self._create_triangulated_sphere()
+        #self.mesh_esfera = self.create_goldberg_polyhedron()
         self.pawn_mesh = self._create_pawn_mesh()
 
     # -------------------------------------------------------------------------
